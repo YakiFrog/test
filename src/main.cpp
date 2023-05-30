@@ -5,7 +5,7 @@
 #include <math.h>
 
 // PS4 Controller
-#define PS4_ADDR "0C:B8:15:F8:3C:D8"
+#define PS4_ADDR "C8:F0:9E:51:65:8C" // red
 
 // エアシリンダー
 #define OPEN_PIN 13 // 1
@@ -33,7 +33,7 @@ int8_t updwn_cmd = 0; // Up:1, Down:-1, Stop:0
 int8_t rollr_cmd = 0;
 int8_t rollr_spd_cmd = 0;
 int8_t auto_updwn_cmd = 0; // 0 or 1
-bool prev_bttn_state[6] = {false, false, false, false, false, false}; // Share, Options, Left, Right, Touchpad, R1
+bool prev_bttn_state[10] = {false, false, false, false, false, false, false, false, false, false}; // Share, Options, Left, Right, Touchpad, R1, ○, △, □, ×
 
 int core0a_free_stack = 0;
 int core0b_free_stack = 0;
@@ -65,7 +65,7 @@ int id[4] = {0x201, 0x202, 0x203, 0x204}; // M3508のID
 int num = 0;
 
 // PID制御用
-float Kp = 50; // 比例ゲイン(元180) (RRなし：100)
+float Kp = 140; // 比例ゲイン(元180) (RRなし：100)
 float Ki = 0.0; // 積分ゲイン
 float Kd = 0.0; // 微分ゲイン
 
@@ -190,28 +190,28 @@ void Core0a(void *args) {
       if (!PS4.Up() && !PS4.Down()){
           updwn_cmd = 0;
       }
-      if (PS4.Circle()) {
+      if (PS4.Circle() && prev_bttn_state[6] == false) {
         if (PS4.L1()){
           auto_updwn_cmd = 1;
         } else {
           rollr_cmd = 1;
         }
       }
-      if (PS4.Triangle()) {
+      if (PS4.Triangle() && prev_bttn_state[7] == false) {
         if (PS4.L1()){
           auto_updwn_cmd = 2;
         } else {
           rollr_cmd = 2;
         }
       }
-      if (PS4.Square()) {
+      if (PS4.Square() && prev_bttn_state[8] == false) {
         if (PS4.L1()){
           auto_updwn_cmd = 3;
         } else {
           rollr_cmd = 3;
         }
       }
-      if (PS4.Cross()) { // 全て停止
+      if (PS4.Cross() && prev_bttn_state[9] == false) { // 全て停止
         if (PS4.L1()){
           auto_updwn_cmd = 4;
         } else {
@@ -272,10 +272,17 @@ void Core0a(void *args) {
       prev_bttn_state[3] = PS4.Right();
       prev_bttn_state[4] = PS4.Touchpad();
       prev_bttn_state[5] = PS4.R1();
+      prev_bttn_state[6] = PS4.Circle();
+      prev_bttn_state[7] = PS4.Triangle();
+      prev_bttn_state[8] = PS4.Square();
+      prev_bttn_state[9] = PS4.Cross();
     } else {
       updwn_cmd = 0;
       rollr_cmd = 0;
       rollr_spd_cmd = 0;
+      l_x = 0;
+      l_y = 0;
+      r_x = 0;
     }
     lstick_x = l_x * 200;
     lstick_y = l_y * 200;
@@ -318,10 +325,23 @@ void Core1b(void *args) {
     // Serial.print(", ");
     // Serial.print(core1m_free_stack);
     // mrpmを表示
+    Serial.print(String(lstick_x) + ", " + String(lstick_y) + ", " + String(rstick_x));
+    Serial.print(" | ");
     Serial.print(String(mrpm[0]) + ", " + String(mrpm[1]) + ", " + String(mrpm[2]) + ", " + String(mrpm[3]));
+    // Serial.print(" | ");
+    // Serial.print(String(mtorque[0]) + ", " + String(mtorque[1]) + ", " + String(mtorque[2]) + ", " + String(mtorque[3]));
     Serial.println();
+
     delay(10); 
     core1b_free_stack = uxTaskGetStackHighWaterMark(NULL);
   }
 }
+
+/*
+白：0C:B8:15:D8:64:76
+青：0C:B8:15:C5:1C:C4
+黒：60:8C:4A:71:05:E2
+黒2：0C:B8:15:F8:3C:D8
+赤：C8:F0:9E:51:65:8C
+*/
 
