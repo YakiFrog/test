@@ -284,9 +284,9 @@ void Core0a(void *args) {
       l_y = 0;
       r_x = 0;
     }
-    lstick_x = l_x * 200;
-    lstick_y = l_y * 200;
-    rstick_x = r_x * 200;
+    lstick_x = l_x * 250;
+    lstick_y = l_y * 250;
+    rstick_x = r_x * 250;
     delay(10);
     core0a_free_stack = uxTaskGetStackHighWaterMark(NULL);
   }
