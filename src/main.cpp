@@ -4,6 +4,41 @@
 #include "m3508.h"
 #include <math.h>
 
+#include <micro_ros_arduino.h>
+#include <stdio.h>
+#include <rcl/rcl.h>
+#include <rcl/error_handling.h>
+#include <rclc/rclc.h>
+#include <rclc/executor.h>
+
+#include <std_msgs/msg/int32.h>
+#include <geometry_msgs/msg/twist.h>
+
+#if !defined(ESP32) && !defined(TARGET_PORTENTA_H7_M7) && !defined(ARDUINO_NANO_RP2040_CONNECT) && !defined(ARDUINO_WIO_TERMINAL)
+#error This example is only avaible for Arduino Portenta, Arduino Nano RP2040 Connect, ESP32 Dev module and Wio Terminal
+#endif
+// micro-ROS
+rclc_executor_t executor; 
+rclc_support_t support; 
+rcl_allocator_t allocator;
+rcl_node_t node;
+
+rcl_publisher_t publisher;
+rcl_subscription_t subscriber;
+
+std_msgs__msg__Int32 pub_msg;
+geometry_msgs__msg__Twist sub_msg;
+
+char* SSID = "OITRP-RASPI";
+char* PASS = "oitrp2023";
+char* AGENT_IP = "192.168.249.10";
+uint16_t AGENT_PORT = 2000;
+
+#define LED_PIN 2
+
+#define RCCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){error_loop();}} 
+#define RCSOFTCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){}} 
+
 // PS4 Controller
 #define PS4_ADDR "C8:F0:9E:51:65:8C" // red
 
@@ -86,6 +121,24 @@ void Core0a(void *args); // PS4 Controller
 void Core0b(void *args);
 void Core1b(void *args);
 
+// error_loop関数は，エラーが発生したときにLEDを点滅させるための関数
+void error_loop(){
+  while(1){
+    digitalWrite(LED_PIN, !digitalRead(LED_PIN));
+    delay(100);
+  }
+}
+
+void subscription_callback(const void *msgin) {
+  const geometry_msgs__msg__Twist * sub_msg = (const geometry_msgs__msg__Twist *)msgin;
+  // if velocity in x direction is 0 turn off LED, if 1 turn on LED
+  // twist: linear.x, linear.y, linear.z, angular.x, angular.y, angular.z
+  digitalWrite(LED_PIN, (sub_msg->linear.x == 0) ? LOW : HIGH);
+  lstick_x = sub_msg->linear.x * 2.50;
+  lstick_y = sub_msg->linear.y * 2.50;
+  rstick_x = sub_msg->angular.x * 2.50;
+}
+
 void setup() {
   Serial.begin(115200);
   Serial2.begin(115200);
@@ -95,28 +148,58 @@ void setup() {
   pinMode(RING_PIN, OUTPUT);
   pinMode(BRIDGE_PIN, OUTPUT);
 
+  pinMode(LED_PIN, OUTPUT);
+
   // CAN
   while (!can_init(rx, tx, CAN_SPEED));
 
-  PS4.begin(PS4_ADDR);
-  Serial.println("> PS4: Started");
-  Serial.println("> PS4: Press PS button to connect");
-  while (!PS4.isConnected()) {
-    Serial.println("> PS4: Connecting...");
-    delay(1000);
-  }
+  // PS4.begin(PS4_ADDR);
+  // Serial.println("> PS4: Started");
+  // Serial.println("> PS4: Press PS button to connect");
+  // while (!PS4.isConnected()) {
+  //   Serial.println("> PS4: Connecting...");
+  //   delay(1000);
+  // }
   
-  Serial.println("> PS4: Connected");
-  PS4.setLed(255, 255, 255);
-  PS4.setRumble(200, 200);
-  PS4.sendToController();
-  delay(1000);
-  PS4.setRumble(0, 0);
-  PS4.sendToController();
+  // Serial.println("> PS4: Connected");
+  // PS4.setLed(255, 255, 255);
+  // PS4.setRumble(200, 200);
+  // PS4.sendToController();
+  // delay(1000);
+  // PS4.setRumble(0, 0);
+  // PS4.sendToController();
+  set_microros_wifi_transports(SSID, PASS, AGENT_IP, AGENT_PORT);
+
+  allocator = rcl_get_default_allocator();
+
+  //create init_options
+  RCCHECK(rclc_support_init(&support, 0, NULL, &allocator));
+
+  // create node
+  RCCHECK(rclc_node_init_default(&node, "NODE_NAME", "", &support));
+
+  // create publisher
+  RCCHECK(rclc_publisher_init_best_effort(
+    &publisher,
+    &node,
+    ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32),
+    "PUB_TOPIC_NAME"));
+
+  // create subscriber
+  RCCHECK(rclc_subscription_init_best_effort(
+    &subscriber,
+    &node,
+    ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist),
+    "/esp32/cmd_vel"));
+
+  // create executor
+  RCCHECK(rclc_executor_init(&executor, &support.context, 1, &allocator));
+  RCCHECK(rclc_executor_add_subscription(&executor, &subscriber, &sub_msg, &subscription_callback, ON_NEW_DATA));
 
   xTaskCreatePinnedToCore(Core0a, "Core0a", 4096, NULL, 3, &thp[0], 0); // (タスク名, タスクのサイズ, パラメータ, 優先度, タスクハンドル, コア番号)
   xTaskCreatePinnedToCore(Core0b, "Core0b", 4096, NULL, 3, &thp[1], 0);
   xTaskCreatePinnedToCore(Core1b, "Core1b", 4096, NULL, 3, &thp[2], 1); 
+  // digitalWrite(LED_PIN, HIGH);
 }
 
 void loop() {
@@ -160,134 +243,135 @@ void loop() {
 void Core0a(void *args) {
   Serial.println("> Core0a: Started");
   while (1) {
-    if (PS4.LatestPacket() && PS4.isConnected()) {
-      // 移動・回転
-      l_x = PS4.LStickX() / 127.0;
-      l_y = PS4.LStickY() / 127.0;
-      r_x = PS4.RStickX() / 127.0;
-      // r_y = PS4.RStickY() / 127.0;
+    // if (PS4.LatestPacket() && PS4.isConnected()) {
+    //   // 移動・回転
+    //   l_x = PS4.LStickX() / 127.0; // -1 ~ 1
+    //   l_y = PS4.LStickY() / 127.0; 
+    //   r_x = PS4.RStickX() / 127.0;
+    //   // r_y = PS4.RStickY() / 127.0;
 
-      if (l_x < 0.1 && l_x > -0.1) l_x = 0;
-      if (l_y < 0.1 && l_y > -0.1) l_y = 0;
-      if (r_x < 0.1 && r_x > -0.1) r_x = 0;
+    //   if (l_x < 0.1 && l_x > -0.1) l_x = 0; // 12.7
+    //   if (l_y < 0.1 && l_y > -0.1) l_y = 0;
+    //   if (r_x < 0.1 && r_x > -0.1) r_x = 0;
 
-      l_x = -l_x * abs(l_x);
-      l_y = l_y * abs(l_y);
-      r_x = r_x * abs(r_x);
+    //   l_x = -l_x * abs(l_x);
+    //   l_y = l_y * abs(l_y);
+    //   r_x = r_x * abs(r_x);
 
-      // 速度半減
-      if (PS4.L1()){
-          l_x *= 0.6;
-          l_y *= 0.6;
-          r_x *= 0.6;
-      }
-      if (PS4.Up()){
-          updwn_cmd = 1;
-      }
-      if (PS4.Down()){
-          updwn_cmd = -1;
-      }
-      if (!PS4.Up() && !PS4.Down()){
-          updwn_cmd = 0;
-      }
-      if (PS4.Circle() && prev_bttn_state[6] == false) {
-        if (PS4.L1()){
-          auto_updwn_cmd = 1;
-        } else {
-          rollr_cmd = 1;
-        }
-      }
-      if (PS4.Triangle() && prev_bttn_state[7] == false) {
-        if (PS4.L1()){
-          auto_updwn_cmd = 2;
-        } else {
-          rollr_cmd = 2;
-        }
-      }
-      if (PS4.Square() && prev_bttn_state[8] == false) {
-        if (PS4.L1()){
-          auto_updwn_cmd = 3;
-        } else {
-          rollr_cmd = 3;
-        }
-      }
-      if (PS4.Cross() && prev_bttn_state[9] == false) { // 全て停止
-        if (PS4.L1()){
-          auto_updwn_cmd = 4;
-        } else {
-          updwn_cmd = 0;
-          rollr_cmd = 0;
-          rollr_spd_cmd = 0;
-        }
-      }
-      if (PS4.Left() && prev_bttn_state[2] == false){
-        rollr_spd_cmd -= 1;
-      }
-      if (PS4.Right() && prev_bttn_state[3] == false){
-        rollr_spd_cmd += 1;
-      }
-      // 回収機構（開閉）デフォルト：開
-      if (PS4.Share() && prev_bttn_state[0] == false){
-        digitalWrite(OPEN_PIN, !(digitalRead(OPEN_PIN)));
-        PS4.setLed(255, 0, 0); // LEDを赤色
-        PS4.sendToController();
-        delay(500);
-        PS4.setLed(255, 255, 255); // LEDを消灯
-        PS4.sendToController();
-      }
-      // 回収機構（上下）条件：リング射出機構が閉じている，昇降機構が0度，回収機構が開いている
-      if (PS4.Options() && prev_bttn_state[1] == false && digitalRead(RING_PIN) == false){
-        if (digitalRead(UPDOWN_PIN) == true && digitalRead(OPEN_PIN) == true) {
-          digitalWrite(UPDOWN_PIN, LOW);
-        } else {
-          digitalWrite(UPDOWN_PIN, HIGH);
-        }
-        PS4.setLed(255, 0, 0); // LEDを赤色
-        PS4.sendToController();
-        delay(500);
-        PS4.setLed(255, 255, 255); // LEDを消灯
-        PS4.sendToController();
-      }
-      // リング射出（回収機構が上がっている）
-      if (PS4.R1() && prev_bttn_state[5] == false && digitalRead(UPDOWN_PIN) == false){
-        digitalWrite(RING_PIN, !(digitalRead(RING_PIN)));
-        PS4.setLed(255, 0, 0); // LEDを赤色
-        PS4.sendToController();
-        delay(500);
-        PS4.setLed(255, 255, 255); // LEDを消灯
-        PS4.sendToController();
-      }
-      // 橋渡し
-      if (PS4.Touchpad() && prev_bttn_state[4] == 0) {
-        digitalWrite(BRIDGE_PIN, !(digitalRead(BRIDGE_PIN))); // タッチパッドのとき，橋渡し
-        PS4.setLed(255, 0, 0); // LEDを赤色
-        PS4.sendToController();
-        delay(500);
-        PS4.setLed(255, 255, 255); // LEDを消灯
-        PS4.sendToController();
-      }
-      prev_bttn_state[0] = PS4.Share();
-      prev_bttn_state[1] = PS4.Options();
-      prev_bttn_state[2] = PS4.Left();
-      prev_bttn_state[3] = PS4.Right();
-      prev_bttn_state[4] = PS4.Touchpad();
-      prev_bttn_state[5] = PS4.R1();
-      prev_bttn_state[6] = PS4.Circle();
-      prev_bttn_state[7] = PS4.Triangle();
-      prev_bttn_state[8] = PS4.Square();
-      prev_bttn_state[9] = PS4.Cross();
-    } else {
-      updwn_cmd = 0;
-      rollr_cmd = 0;
-      rollr_spd_cmd = 0;
-      l_x = 0;
-      l_y = 0;
-      r_x = 0;
-    }
-    lstick_x = l_x * 250;
-    lstick_y = l_y * 250;
-    rstick_x = r_x * 250;
-    delay(10);
+    //   // 速度半減
+    //   if (PS4.L1()){
+    //       l_x *= 0.6;
+    //       l_y *= 0.6;
+    //       r_x *= 0.6;
+    //   }
+    //   if (PS4.Up()){
+    //       updwn_cmd = 1;
+    //   }
+    //   if (PS4.Down()){
+    //       updwn_cmd = -1;
+    //   }
+    //   if (!PS4.Up() && !PS4.Down()){
+    //       updwn_cmd = 0;
+    //   }
+    //   if (PS4.Circle() && prev_bttn_state[6] == false) {
+    //     if (PS4.L1()){
+    //       auto_updwn_cmd = 1;
+    //     } else {
+    //       rollr_cmd = 1;
+    //     }
+    //   }
+    //   if (PS4.Triangle() && prev_bttn_state[7] == false) {
+    //     if (PS4.L1()){
+    //       auto_updwn_cmd = 2;
+    //     } else {
+    //       rollr_cmd = 2;
+    //     }
+    //   }
+    //   if (PS4.Square() && prev_bttn_state[8] == false) {
+    //     if (PS4.L1()){
+    //       auto_updwn_cmd = 3;
+    //     } else {
+    //       rollr_cmd = 3;
+    //     }
+    //   }
+    //   if (PS4.Cross() && prev_bttn_state[9] == false) { // 全て停止
+    //     if (PS4.L1()){
+    //       auto_updwn_cmd = 4;
+    //     } else {
+    //       updwn_cmd = 0;
+    //       rollr_cmd = 0;
+    //       rollr_spd_cmd = 0;
+    //     }
+    //   }
+    //   if (PS4.Left() && prev_bttn_state[2] == false){
+    //     rollr_spd_cmd -= 1;
+    //   }
+    //   if (PS4.Right() && prev_bttn_state[3] == false){
+    //     rollr_spd_cmd += 1;
+    //   }
+    //   // 回収機構（開閉）デフォルト：開
+    //   if (PS4.Share() && prev_bttn_state[0] == false){
+    //     digitalWrite(OPEN_PIN, !(digitalRead(OPEN_PIN)));
+    //     PS4.setLed(255, 0, 0); // LEDを赤色
+    //     PS4.sendToController();
+    //     delay(500);
+    //     PS4.setLed(255, 255, 255); // LEDを消灯
+    //     PS4.sendToController();
+    //   }
+    //   // 回収機構（上下）条件：リング射出機構が閉じている，昇降機構が0度，回収機構が開いている
+    //   if (PS4.Options() && prev_bttn_state[1] == false && digitalRead(RING_PIN) == false){
+    //     if (digitalRead(UPDOWN_PIN) == true && digitalRead(OPEN_PIN) == true) {
+    //       digitalWrite(UPDOWN_PIN, LOW);
+    //     } else {
+    //       digitalWrite(UPDOWN_PIN, HIGH);
+    //     }
+    //     PS4.setLed(255, 0, 0); // LEDを赤色
+    //     PS4.sendToController();
+    //     delay(500);
+    //     PS4.setLed(255, 255, 255); // LEDを消灯
+    //     PS4.sendToController();
+    //   }
+    //   // リング射出（回収機構が上がっている）
+    //   if (PS4.R1() && prev_bttn_state[5] == false && digitalRead(UPDOWN_PIN) == false){
+    //     digitalWrite(RING_PIN, !(digitalRead(RING_PIN)));
+    //     PS4.setLed(255, 0, 0); // LEDを赤色
+    //     PS4.sendToController();
+    //     delay(500);
+    //     PS4.setLed(255, 255, 255); // LEDを消灯
+    //     PS4.sendToController();
+    //   }
+    //   // 橋渡し
+    //   if (PS4.Touchpad() && prev_bttn_state[4] == 0) {
+    //     digitalWrite(BRIDGE_PIN, !(digitalRead(BRIDGE_PIN))); // タッチパッドのとき，橋渡し
+    //     PS4.setLed(255, 0, 0); // LEDを赤色
+    //     PS4.sendToController();
+    //     delay(500);
+    //     PS4.setLed(255, 255, 255); // LEDを消灯
+    //     PS4.sendToController();
+    //   }
+    //   prev_bttn_state[0] = PS4.Share();
+    //   prev_bttn_state[1] = PS4.Options();
+    //   prev_bttn_state[2] = PS4.Left();
+    //   prev_bttn_state[3] = PS4.Right();
+    //   prev_bttn_state[4] = PS4.Touchpad();
+    //   prev_bttn_state[5] = PS4.R1();
+    //   prev_bttn_state[6] = PS4.Circle();
+    //   prev_bttn_state[7] = PS4.Triangle();
+    //   prev_bttn_state[8] = PS4.Square();
+    //   prev_bttn_state[9] = PS4.Cross();
+    // } else {
+    //   updwn_cmd = 0;
+    //   rollr_cmd = 0;
+    //   rollr_spd_cmd = 0;
+    //   l_x = 0;
+    //   l_y = 0;
+    //   r_x = 0;
+    // }
+    // lstick_x = l_x * 250;
+    // lstick_y = l_y * 250;
+    // rstick_x = r_x * 250;
+    RCCHECK(rclc_executor_spin_some(&executor, RCL_MS_TO_NS(10))); 
+    delay(1);
     core0a_free_stack = uxTaskGetStackHighWaterMark(NULL);
   }
 }
@@ -326,13 +410,12 @@ void Core1b(void *args) {
     // Serial.print(core1m_free_stack);
     // mrpmを表示
     Serial.print(String(lstick_x) + ", " + String(lstick_y) + ", " + String(rstick_x));
-    Serial.print(" | ");
-    Serial.print(String(mrpm[0]) + ", " + String(mrpm[1]) + ", " + String(mrpm[2]) + ", " + String(mrpm[3]));
     // Serial.print(" | ");
-    // Serial.print(String(mtorque[0]) + ", " + String(mtorque[1]) + ", " + String(mtorque[2]) + ", " + String(mtorque[3]));
+    // Serial.print(String(mrpm[0]) + ", " + String(mrpm[1]) + ", " + String(mrpm[2]) + ", " + String(mrpm[3]));
+    // // Serial.print(" | ");
+    // // Serial.print(String(mtorque[0]) + ", " + String(mtorque[1]) + ", " + String(mtorque[2]) + ", " + String(mtorque[3]));
     Serial.println();
-
-    delay(10); 
+    delay(50); 
     core1b_free_stack = uxTaskGetStackHighWaterMark(NULL);
   }
 }
